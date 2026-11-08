@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from . import __version__, camera_info
 from .controls import ControlError
-from .engine import CONTAINERS, CameraEngine, available_containers
+from .engine import CONTAINERS, CameraEngine, available_containers, probe_containers_async
 
 WEB_DIR = Path(__file__).with_name("web")
 BOUNDARY = "elpcamframe"
@@ -107,8 +107,11 @@ def create_app(engine: CameraEngine) -> FastAPI:
         return resp
 
     # ---------------------------------------------------------------- info
+    probe_containers_async()
+
     @app.get("/api/info")
     def info() -> dict[str, Any]:
+        avail = available_containers(wait=False)
         return {
             "app": "ELPCam", "version": __version__, "platform": sys.platform,
             "model": camera_info.MODEL, "specs": camera_info.SPECS,
@@ -116,8 +119,8 @@ def create_app(engine: CameraEngine) -> FastAPI:
             "links": camera_info.LINKS, "data_dir": str(engine.data_dir),
             "opencv": cv2.__version__,
             "containers": [{"key": "auto", "label": "Auto (H.264 up to 1080p, else MPEG-4)"
-                            if "mp4-h264" in available_containers() else "Auto (MPEG-4)"}]
-            + [{"key": k, "label": CONTAINERS[k][0]} for k in available_containers()],
+                            if "mp4-h264" in avail else "Auto (MPEG-4)"}]
+            + [{"key": k, "label": CONTAINERS[k][0]} for k in avail],
             "simulate": engine.simulate,
         }
 

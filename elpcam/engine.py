@@ -15,13 +15,15 @@ from __future__ import annotations
 import collections
 import json
 import logging
+import math
 import queue
 import re
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import cv2
 import numpy as np
@@ -46,12 +48,34 @@ CONTAINERS: dict[str, tuple[str, str, list[tuple[int, str]]]] = {
     "avi-xvid": ("AVI · XviD", ".avi", [(cv2.CAP_FFMPEG, "XVID"), (cv2.CAP_ANY, "XVID")]),
 }
 _available_containers: Optional[list[str]] = None
+_probe_lock = threading.Lock()
+_probe_started = False
 
 
-def available_containers() -> list[str]:
-    """Containers whose encoder actually opens on this machine (probed once)."""
+def probe_containers_async() -> None:
+    """Start the encoder probe in the background. Opening a Media Foundation writer takes several
+    seconds on some PCs, so servers call this at startup instead of probing on the first request."""
+    global _probe_started
+    if not _probe_started:
+        _probe_started = True
+        threading.Thread(target=available_containers, name="elpcam-encoder-probe", daemon=True).start()
+
+
+def available_containers(wait: bool = True) -> list[str]:
+    """Containers whose encoder actually opens on this machine (probed once).
+
+    With ``wait=False`` this never blocks: until the probe has finished it returns the likely list
+    (H.264 through Media Foundation on Windows only) and makes sure the probe is running.
+    """
     global _available_containers
-    if _available_containers is None:
+    if _available_containers is not None:
+        return _available_containers
+    if not wait:
+        probe_containers_async()
+        return [k for k in CONTAINERS if k != "mp4-h264" or sys.platform == "win32"]
+    with _probe_lock:
+        if _available_containers is not None:
+            return _available_containers
         import tempfile
 
         ok = []
@@ -80,8 +104,8 @@ def available_containers() -> list[str]:
 
 def resolve_container(container: str, width: int) -> str:
     """'auto' -> H.264 when it can keep up (<= 1920 px wide), otherwise fast MPEG-4."""
-    avail = available_containers()
     if container == "auto":
+        avail = available_containers()
         if "mp4-h264" in avail and width <= 1920:
             return "mp4-h264"
         return "mp4" if "mp4" in avail else (avail[0] if avail else "avi")
@@ -132,40 +156,64 @@ class FpsMeter:
 
 
 class Recorder:
-    """Writes frames to a video file at a constant frame rate on its own thread."""
+    """Writes frames to a video file at a constant frame rate on its own thread.
 
-    def __init__(self, path: Path, container: str, fps: float, size: tuple[int, int]) -> None:
-        _label, ext, cands = CONTAINERS.get(container, CONTAINERS["mp4"])
+    The encoder is opened on that thread too: creating a Media Foundation H.264 writer takes several
+    seconds on some PCs, and frames captured meanwhile wait in the queue, so the clip starts at the click.
+    """
+
+    QUEUE_BYTES = 512 * 1024 * 1024  # cap on frames waiting for the encoder (~33 frames at 5 MP)
+
+    def __init__(self, path: Path, container: str, fps: float, size: tuple[int, int],
+                 on_error: Optional[Callable[["Recorder", str], None]] = None) -> None:
+        self.label, ext, self._cands = CONTAINERS.get(container, CONTAINERS["mp4"])
         self.container = container
         self.path = path.with_suffix(ext)
         self.fps = max(1.0, float(fps))
         self.size = size
-        self.writer = None
-        for api, fc in cands:
-            if container == "mp4-h264" and api == cv2.CAP_FFMPEG:
-                continue
-            w = cv2.VideoWriter(str(self.path), api, cv2.VideoWriter_fourcc(*fc), self.fps, size)
-            if w.isOpened():
-                self.writer, self.codec = w, fc
-                break
-            w.release()
-        if self.writer is None:
-            raise RuntimeError(f"No working video encoder for {container}")
-        self.q: "queue.Queue[Optional[tuple[np.ndarray, float]]]" = queue.Queue(maxsize=120)
+        self.writer: Optional[cv2.VideoWriter] = None
+        self.codec: Optional[str] = None
+        self.error: Optional[str] = None
+        self._on_error = on_error
+        frame_bytes = max(1, size[0] * size[1] * 3)
+        self.q: "queue.Queue[Optional[tuple[np.ndarray, float]]]" = queue.Queue(
+            maxsize=max(8, min(120, self.QUEUE_BYTES // frame_bytes)))
         self.started = time.time()
+        self.stopped: Optional[float] = None
         self.frames_written = 0
         self.dropped = 0
         self._next_t: Optional[float] = None
         self._t = threading.Thread(target=self._run, name="elpcam-recorder", daemon=True)
         self._t.start()
 
+    def _open_writer(self) -> None:
+        for api, fc in self._cands:
+            if self.container == "mp4-h264" and api == cv2.CAP_FFMPEG:
+                continue
+            w = cv2.VideoWriter(str(self.path), api, cv2.VideoWriter_fourcc(*fc), self.fps, self.size)
+            if w.isOpened():
+                self.writer, self.codec = w, fc
+                return
+            w.release()
+        raise RuntimeError(f"No working video encoder for {self.label}")
+
     def push(self, frame: np.ndarray, t: float) -> None:
+        if self.error:
+            return
         try:
             self.q.put_nowait((frame, t))
         except queue.Full:
             self.dropped += 1
 
     def _run(self) -> None:
+        try:
+            self._open_writer()
+        except Exception as exc:
+            self.error = str(exc)
+            log.error("Recording failed: %s", exc)
+            if self._on_error:
+                self._on_error(self, self.error)
+            return
         period = 1.0 / self.fps
         while True:
             item = self.q.get()
@@ -189,14 +237,21 @@ class Recorder:
         self.writer.release()
 
     def stop(self) -> dict[str, Any]:
-        self.q.put(None)
+        self.stopped = time.time()
+        while self._t.is_alive():  # the queue may be full while the encoder is still opening
+            try:
+                self.q.put(None, timeout=0.5)
+                break
+            except queue.Full:
+                pass
         self._t.join(timeout=30)
         return self.info()
 
     def info(self) -> dict[str, Any]:
-        return {"file": self.path.name, "codec": self.codec, "container": self.container, "fps": self.fps,
+        return {"file": self.path.name, "codec": self.codec or "starting", "container": self.container,
+                "fps": self.fps, "error": self.error,
                 "size": list(self.size),
-                "elapsed": round(time.time() - self.started, 1), "frames": self.frames_written,
+                "elapsed": round((self.stopped or time.time()) - self.started, 1), "frames": self.frames_written,
                 "dropped": self.dropped}
 
 
@@ -462,13 +517,40 @@ class CameraEngine:
                 self._frame_id += 1
                 self._cond.notify_all()
 
+    @staticmethod
+    def _mode_props(mode: Optional[VideoMode], fps: Optional[float]) -> list[tuple[int, int]]:
+        """Capture properties for ``mode``, format code first."""
+        if mode is None:
+            return []
+        props = []
+        if mode.fourcc and len(mode.fourcc) == 4:
+            props.append((cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*mode.fourcc)))
+        props += [(cv2.CAP_PROP_FRAME_WIDTH, mode.width), (cv2.CAP_PROP_FRAME_HEIGHT, mode.height)]
+        want = fps or mode.max_fps
+        if want:
+            props.append((cv2.CAP_PROP_FPS, int(round(want))))
+        return props
+
     def _open_cap(self, mode: Optional[VideoMode], fps: Optional[float]) -> cv2.VideoCapture:
         assert self.device is not None
+        props = self._mode_props(mode, fps)
         if self.device.path == SIM_PATH:
             state = self.backend.state if isinstance(self.backend, SimulatedControls) else None
             cap = SimulatedCapture(state or SimulatedControls().state)
+            for p, v in props:
+                cap.set(p, v)
         else:
-            cap = cv2.VideoCapture(self.device.index, capture_api())
+            # Hand the mode to the constructor so the backend builds its capture graph once in the right
+            # format. With set() after opening, DirectShow rebuilds the graph for every property (2-3 s
+            # each) and drops the format code when the size changes afterwards: MJPG silently became
+            # YUY2, which USB 2.0 can only carry at a few fps at high resolutions.
+            cap = cv2.VideoCapture(self.device.index, capture_api(), [x for pv in props for x in pv])
+            if not cap.isOpened() and props:
+                cap.release()
+                cap = cv2.VideoCapture(self.device.index, capture_api())
+                if cap.isOpened():  # fallback: size and rate first, format code last (keeps MJPG on DirectShow)
+                    for p, v in sorted(props, key=lambda pv: pv[0] == cv2.CAP_PROP_FOURCC):
+                        cap.set(p, v)
         if not cap.isOpened():
             cap.release()
             reason = camera_privacy_problem()
@@ -476,18 +558,17 @@ class CameraEngine:
                 raise ControlError(reason)
             raise ControlError(f"Could not open '{self.device.name}'. Is another application using it, "
                                "or is camera access blocked in the OS privacy settings?")
-        if mode is not None:
-            if mode.fourcc and len(mode.fourcc) == 4:
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*mode.fourcc))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, mode.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, mode.height)
-            want = fps or mode.max_fps
-            if want:
-                cap.set(cv2.CAP_PROP_FPS, float(want))
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
+        if mode is not None and mode.fourcc and len(mode.fourcc) == 4:
+            try:
+                got = int(cap.get(cv2.CAP_PROP_FOURCC)).to_bytes(4, "little").decode("ascii")
+            except (ValueError, OverflowError, UnicodeDecodeError):
+                got = ""
+            if got.isalnum() and got.strip().upper() != mode.fourcc.upper():
+                self.event("warning", f"Requested {mode.fourcc}, camera delivers {got}")
         return cap
 
     def _start_capture(self, mode: Optional[VideoMode], fps: Optional[float]) -> None:
@@ -860,15 +941,26 @@ class CameraEngine:
                 f = self._frame
             if f is None:
                 raise ControlError("No frame available")
-            # nominal rate; the recorder repeats/drops frames so playback stays real-time
-            rate = fps or self.fps_req or round(self._fps.fps) or 15
+            # Nominal rate; the recorder repeats/drops frames so playback stays real-time. When the camera
+            # delivers clearly fewer frames than requested (auto exposure in dim light), record at the
+            # measured rate instead of encoding every frame several times over.
+            measured = self._fps.fps if len(self._fps.ts) >= 10 else 0.0
+            rate = fps or self.fps_req or round(measured) or 15
+            if not fps and 1 <= measured < 0.8 * rate:
+                rate = math.ceil(measured)
             size = (f.shape[1], f.shape[0])
             path = self.captures_dir / f"VID_{_stamp()}"
-            self.recorder = Recorder(path, resolve_container(container, size[0]), float(rate), size)
+            rec = Recorder(path, resolve_container(container, size[0]), float(rate), size,
+                           on_error=self._recording_failed)
+            self.recorder = None if rec.error else rec  # the encoder may already have failed
             self.settings["record_container"] = container
-            self.event("info", f"Recording {self.recorder.path.name} ({size[0]}x{size[1]} @ {rate:g} fps, "
-                               f"{self.recorder.codec})")
-            return self.recorder.info()
+            self.event("info", f"Recording {rec.path.name} ({size[0]}x{size[1]} @ {rate:g} fps, {rec.label.split(' (')[0]})")
+            return rec.info()
+
+    def _recording_failed(self, rec: Recorder, msg: str) -> None:
+        if self.recorder is rec:
+            self.recorder = None
+        self.event("warning", f"Recording stopped: {msg}")
 
     def stop_recording(self) -> Optional[dict[str, Any]]:
         rec = self.recorder
