@@ -9,9 +9,11 @@ documentation, and how the camera's controls are exposed on each operating syste
   `FD100` / `BH100` = 100° low-distortion, `SFV(5-50)` = varifocal, …)
 * **Manufacturer:** ELP, made by Shenzhen Ailipu Technology Co., Ltd., which also sells under the **SVPRO** brand.
 * **Class:** USB Video Class (UVC) device, driver-free on Windows, Linux, macOS and Android (OTG).
-* On Windows it appears as a DirectShow "video input device". The friendly name depends on firmware
-  (often "USB Camera" / "HD USB Camera"). ELPCam marks cameras it recognises as ELP with ★, either by name or
-  by USB vendor id (Ailipu modules commonly use `32E4`; older ones `05A3`, `1BCF`, `0C45`, `1E4E`).
+* On Windows it appears as a DirectShow "video input device". The friendly name depends on firmware.
+  The unit used to develop ELPCam enumerates as **"HD USB Camera", USB `05A3:9530`, serial `SN5100`**, a
+  composite device whose interface 0 binds to Microsoft's `usbvideo.sys`. ELPCam marks cameras it recognises
+  as ELP with ★, either by name or by USB vendor id (`05A3` on this model; newer Ailipu modules use `32E4`; also
+  seen: `1BCF`, `0C45`, `1E4E`).
 
 ## Specifications (manufacturer spec sheet, USB500W05G family)
 
@@ -93,5 +95,8 @@ reports, with the driver's own min/max/step/default.
 * **Low-light compensation** lets auto exposure lower the frame rate in dim light, which gives a brighter but slower image.
 * **Exposure** on Windows is a power of two: −1 = 1/2 s, −6 = 1/64 s, −10 ≈ 1/1000 s. Longer exposures cap the
   frame rate.
-* Plug the camera directly into the computer (or a powered hub). The module draws up to 200 mA.
+* Plug the camera directly into the computer (or a powered hub). The module draws up to 200 mA. If Device
+  Manager shows the camera with **Code 10** (event log: *"had a problem starting"*, status `0xC0000182`),
+  the hub or dock usually couldn't supply enough power or bandwidth. Move the camera to a port on the computer
+  itself.
 * Only one application can stream from the camera at a time. Close AMCap/Teams/Zoom before starting ELPCam.
