@@ -35,8 +35,8 @@ dev = ["pytest>=7"]
 elpcam = "elpcam.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/amcleodUNH/elpcam"
-Documentation = "https://github.com/amcleodUNH/elpcam/blob/main/docs/CAMERA.md"
+Homepage = "https://github.com/AndyMcLeod/elpcam"
+Documentation = "https://github.com/AndyMcLeod/elpcam/blob/main/docs/CAMERA.md"
 
 [tool.setuptools]
 packages = ["elpcam", "elpcam.controls"]
