@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# ELPCam runtime data (captures, presets, settings, calibration)
+elpcam-data/
+
+# Local tooling
+.claude/
+.vscode/
+.idea/
+*.log

@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ELPCam</title>
+<meta name="description" content="Browser control panel for the ELP-USB500W05G-BL170 5MP fisheye USB camera">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='7' width='28' height='20' rx='5' fill='%2312161d' stroke='%234cc2ff' stroke-width='2'/%3E%3Ccircle cx='16' cy='17' r='6' fill='none' stroke='%234cc2ff' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='17' r='2' fill='%234cc2ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css?v=1.0.0">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="7" width="28" height="20" rx="5"/><circle cx="16" cy="17" r="6"/><circle cx="16" cy="17" r="2" class="dot"/></svg>
+    <div><strong>ELPCam</strong><span id="modelName">USB500W05G-BL170</span></div>
+  </div>
+  <div class="source">
+    <label class="field"><span>Camera</span><select id="deviceSel"></select></label>
+    <button id="refreshDevices" class="icon-btn" title="Rescan cameras" aria-label="Rescan cameras">
+      <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg></button>
+    <label class="field"><span>Format</span><select id="modeSel"></select></label>
+    <label class="field narrow"><span>FPS</span><select id="fpsSel"></select></label>
+    <button id="openBtn" class="btn primary">Open</button>
+  </div>
+  <div class="pills">
+    <span class="pill" id="statePill"><i></i><b>closed</b></span>
+    <span class="pill mono" id="fpsPill" title="Measured frame rate">– fps</span>
+    <span class="pill mono" id="sizePill" title="Sensor frame size">–</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="viewer">
+    <div class="stage" id="stage">
+      <img id="live" alt="Live camera view" draggable="false">
+      <div class="badge rec" id="recBadge" hidden><i></i><span>REC 00:00</span></div>
+      <div class="badge tl" id="tlBadge" hidden>TIME-LAPSE <span>0</span></div>
+      <div class="hint" id="stageHint" hidden></div>
+      <canvas id="histo" width="256" height="100" hidden></canvas>
+      <div class="flash" id="flash"></div>
+    </div>
+    <div class="toolbar">
+      <div class="group">
+        <button class="btn tool" id="snapBtn" title="Snapshot (S)"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span>Snapshot</span></button>
+        <button class="btn tool" id="stillBtn" title="Full-resolution still (Shift+S)"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15l3-4 3 3 2-2 3 3"/></svg><span>5MP Still</span></button>
+        <button class="btn tool rec-btn" id="recBtn" title="Record (R)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" class="fill"/></svg><span>Record</span></button>
+        <button class="btn tool" id="tlBtn" title="Time-lapse"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2M9 2h6"/></svg><span>Time-lapse</span></button>
+      </div>
+      <div class="group">
+        <button class="btn tool toggle" id="mirrorBtn" title="Mirror (M)"><svg viewBox="0 0 24 24"><path d="M12 3v18M8 7l-5 5 5 5zM16 7l5 5-5 5z"/></svg><span>Mirror</span></button>
+        <button class="btn tool toggle" id="flipBtn" title="Flip vertical (V)"><svg viewBox="0 0 24 24"><path d="M3 12h18M7 8l5-5 5 5zM7 16l5 5 5-5z"/></svg><span>Flip</span></button>
+        <button class="btn tool" id="rotBtn" title="Rotate 90° (T)"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-3-6.2M20 4v5h-5"/></svg><span>Rotate</span></button>
+        <div class="seg" id="dewarpSeg" role="radiogroup" aria-label="Fisheye dewarp">
+          <button data-v="off">Fisheye</button><button data-v="perspective">Perspective</button><button data-v="panorama">Panorama</button>
+        </div>
+      </div>
+      <div class="group">
+        <button class="btn tool toggle" id="histBtn" title="Histogram (H)"><svg viewBox="0 0 24 24"><path d="M4 20V10M9 20V4M14 20v-7M19 20V8"/></svg><span>Histogram</span></button>
+        <button class="btn tool" id="fsBtn" title="Fullscreen (F)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg><span>Fullscreen</span></button>
+      </div>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="camera" class="active">Camera</button>
+      <button role="tab" data-tab="image">Image</button>
+      <button role="tab" data-tab="capture">Capture</button>
+      <button role="tab" data-tab="media">Media</button>
+      <button role="tab" data-tab="presets">Presets</button>
+      <button role="tab" data-tab="info">Info</button>
+    </nav>
+
+    <!-- CAMERA -->
+    <div class="tab-body active" id="tab-camera">
+      <div class="note" id="camNote" hidden></div>
+      <section class="card">
+        <h3>Image <small>UVC processing unit</small></h3>
+        <div id="ctlImage" class="ctl-list"></div>
+      </section>
+      <section class="card">
+        <h3>Exposure &amp; lens <small>UVC camera terminal</small></h3>
+        <div id="ctlCamera" class="ctl-list"></div>
+      </section>
+      <section class="card" id="ctlOtherCard" hidden>
+        <h3>Other</h3>
+        <div id="ctlOther" class="ctl-list"></div>
+      </section>
+      <div class="row-btns">
+        <button class="btn" id="resetCtl">Reset all to defaults</button>
+        <button class="btn" id="reloadCtl">Refresh</button>
+        <button class="btn" id="driverDlg" title="Open the driver's own property sheet (same dialog as AMCap)">Driver dialog</button>
+      </div>
+    </div>
+
+    <!-- IMAGE / PROCESSING -->
+    <div class="tab-body" id="tab-image">
+      <section class="card">
+        <h3>Orientation</h3>
+        <div class="toggles">
+          <label class="switch"><input type="checkbox" data-p="mirror"><i></i>Mirror</label>
+          <label class="switch"><input type="checkbox" data-p="flip"><i></i>Flip vertical</label>
+        </div>
+        <div class="field-row"><span>Rotate</span>
+          <div class="seg small" id="rotSeg"><button data-v="0">0°</button><button data-v="90">90°</button><button data-v="180">180°</button><button data-v="270">270°</button></div>
+        </div>
+      </section>
+      <section class="card">
+        <h3>Fisheye dewarp <small>170° lens</small></h3>
+        <div class="field-row"><span>View</span>
+          <div class="seg small" id="dewarpSeg2"><button data-v="off">Off</button><button data-v="perspective">Perspective</button><button data-v="panorama">Panorama</button></div>
+        </div>
+        <div class="ctl-list" id="dewarpCtl"></div>
+        <label class="switch"><input type="checkbox" data-p="use_calibration"><i></i>Use lens calibration <em id="calStatus" class="muted"></em></label>
+        <p class="muted small">Tip: with dewarp on, drag the picture to pan/tilt and scroll to change the view angle.</p>
+        <div class="row-btns"><button class="btn" id="resetView">Reset view</button></div>
+      </section>
+      <section class="card">
+        <h3>Digital zoom</h3>
+        <div class="ctl-list" id="zoomCtl"></div>
+        <div class="row-btns"><button class="btn" id="resetZoom">Reset zoom</button></div>
+      </section>
+      <section class="card">
+        <h3>Overlays</h3>
+        <div class="toggles">
+          <label class="switch"><input type="checkbox" data-p="timestamp"><i></i>Timestamp</label>
+          <label class="switch"><input type="checkbox" data-p="grid"><i></i>Thirds grid</label>
+          <label class="switch"><input type="checkbox" data-p="crosshair"><i></i>Crosshair</label>
+        </div>
+        <label class="field block"><span>Label text</span><input type="text" id="labelText" maxlength="120" placeholder="e.g. Bench camera 1"></label>
+        <label class="switch"><input type="checkbox" data-p="overlays_on_capture"><i></i>Burn overlays into photos &amp; videos</label>
+      </section>
+      <section class="card">
+        <h3>Preview stream <small>captures are always full size</small></h3>
+        <label class="field block"><span>Preview width</span>
+          <select id="previewWidth"><option value="640">640 px</option><option value="960">960 px</option><option value="1280">1280 px</option><option value="1920">1920 px</option><option value="0">Full resolution</option></select></label>
+        <div class="ctl-list" id="previewCtl"></div>
+      </section>
+    </div>
+
+    <!-- CAPTURE -->
+    <div class="tab-body" id="tab-capture">
+      <section class="card">
+        <h3>Stills</h3>
+        <div class="grid2">
+          <label class="field block"><span>Format</span><select id="stillFmt"><option value="jpg">JPEG</option><option value="png">PNG (lossless)</option><option value="bmp">BMP</option><option value="tif">TIFF</option></select></label>
+          <label class="field block"><span>JPEG quality</span><input type="number" id="stillQ" min="50" max="100" value="95"></label>
+        </div>
+        <label class="switch"><input type="checkbox" id="stillRaw"><i></i>Raw sensor frame (skip dewarp, orientation &amp; overlays)</label>
+        <div class="row-btns">
+          <button class="btn primary" id="snapBtn2">Snapshot</button>
+          <button class="btn" id="stillBtn2">Full-resolution still</button>
+        </div>
+        <p class="muted small">A full-resolution still briefly switches the camera to its largest mode (2592×1944 on the ELP), lets exposure settle, saves, and switches back.</p>
+      </section>
+      <section class="card">
+        <h3>Video recording</h3>
+        <div class="grid2">
+          <label class="field block"><span>Container</span><select id="recContainer"><option value="auto">Auto</option></select></label>
+          <label class="field block"><span>Frame rate</span><input type="number" id="recFps" min="1" max="60" step="1" placeholder="auto"></label>
+        </div>
+        <div class="row-btns"><button class="btn rec-solid" id="recBtn2">Start recording</button></div>
+        <p class="muted small" id="recInfo">Recorded at the processed output size. Frames are paced to a constant rate so playback runs at real speed.</p>
+      </section>
+      <section class="card">
+        <h3>Time-lapse</h3>
+        <div class="grid2">
+          <label class="field block"><span>Interval (s)</span><input type="number" id="tlInterval" min="0.2" step="0.1" value="5"></label>
+          <label class="field block"><span>Playback fps</span><input type="number" id="tlFps" min="1" max="60" value="30"></label>
+        </div>
+        <label class="switch"><input type="checkbox" id="tlVideo" checked><i></i>Also build an MP4 while capturing</label>
+        <div class="row-btns"><button class="btn" id="tlBtn2">Start time-lapse</button></div>
+        <p class="muted small" id="tlInfo"></p>
+      </section>
+      <section class="card">
+        <h3>Fisheye calibration <small>optional</small></h3>
+        <p class="muted small">Print a checkerboard, hold it in front of the camera at 10–20 different positions and angles (cover the edges of the picture), press <b>Capture view</b> each time, then <b>Compute</b>. The result is saved per resolution and makes dewarping geometrically exact.</p>
+        <div class="grid3">
+          <label class="field block"><span>Inner corners X</span><input type="number" id="calCols" min="3" max="30" value="9"></label>
+          <label class="field block"><span>Inner corners Y</span><input type="number" id="calRows" min="3" max="30" value="6"></label>
+          <label class="field block"><span>Square (mm)</span><input type="number" id="calSq" min="1" step="0.5" value="25"></label>
+        </div>
+        <div class="row-btns">
+          <button class="btn" id="calCap">Capture view <b id="calCount">0</b></button>
+          <button class="btn primary" id="calCompute">Compute</button>
+          <button class="btn" id="calClear">Clear</button>
+        </div>
+        <p class="muted small mono" id="calResult"></p>
+      </section>
+    </div>
+
+    <!-- MEDIA -->
+    <div class="tab-body" id="tab-media">
+      <div class="row-btns spread"><span class="muted small" id="mediaDir"></span><button class="btn" id="mediaRefresh">Refresh</button></div>
+      <div class="media-grid" id="mediaGrid"></div>
+    </div>
+
+    <!-- PRESETS -->
+    <div class="tab-body" id="tab-presets">
+      <section class="card">
+        <h3>Save current settings</h3>
+        <div class="inline">
+          <input type="text" id="presetName" placeholder="Preset name, e.g. Daylight bench">
+          <button class="btn primary" id="presetSave">Save</button>
+        </div>
+        <label class="switch"><input type="checkbox" id="presetMode" checked><i></i>Include video format</label>
+        <p class="muted small">Stores every camera control (with auto flags), the processing settings and optionally the format.</p>
+      </section>
+      <div id="presetList" class="preset-list"></div>
+    </div>
+
+    <!-- INFO -->
+    <div class="tab-body" id="tab-info">
+      <section class="card"><h3>Connected device</h3><table class="kv" id="devTable"></table></section>
+      <section class="card"><h3>Video modes reported by the camera</h3><table class="modes" id="modeTable"></table></section>
+      <section class="card"><h3 id="specTitle">Specifications</h3><table class="kv" id="specTable"></table></section>
+      <section class="card"><h3>Documentation &amp; official software</h3><ul class="links" id="linkList"></ul></section>
+      <section class="card"><h3>Keyboard shortcuts</h3>
+        <table class="kv"><tr><td><kbd>S</kbd></td><td>Snapshot</td></tr><tr><td><kbd>Shift</kbd>+<kbd>S</kbd></td><td>Full-resolution still</td></tr>
+        <tr><td><kbd>R</kbd></td><td>Start / stop recording</td></tr><tr><td><kbd>M</kbd> / <kbd>V</kbd> / <kbd>T</kbd></td><td>Mirror / flip / rotate</td></tr>
+        <tr><td><kbd>D</kbd></td><td>Cycle fisheye view</td></tr><tr><td><kbd>H</kbd></td><td>Histogram</td></tr><tr><td><kbd>F</kbd></td><td>Fullscreen</td></tr></table>
+      </section>
+      <section class="card"><h3>API</h3><p class="small">Every function is available over HTTP — interactive docs at <a href="/docs" target="_blank">/docs</a>. Live MJPEG stream: <code>/stream.mjpg</code>.</p><p class="muted small mono" id="appVer"></p></section>
+    </div>
+  </aside>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="lightbox" id="lightbox" hidden><div class="lb-inner"><button class="icon-btn lb-close" aria-label="Close">✕</button><div id="lbBody"></div><div class="lb-cap" id="lbCap"></div></div></div>
+
+<script src="/static/app.js?v=1.0.0"></script>
+</body>
+</html>
